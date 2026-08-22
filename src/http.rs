@@ -1,6 +1,7 @@
-use std::fmt;
+use std::{error::Error, fmt::{self, Display, Formatter}};
 
 const CRLF: &'static str = "\r\n";
+const HTTP_VERSION: &'static str = "HTTP/1.1";
 const HEADER_VALUE_MAX_LENGTH: usize = 8192;
 
 #[derive(Debug)]
@@ -12,13 +13,13 @@ impl HttpParseError {
     }
 }
 
-impl fmt::Display for HttpParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for HttpParseError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-impl std::error::Error for HttpParseError {}
+impl Error for HttpParseError {}
 
 #[derive(Debug)]
 enum HttpMethod {
@@ -54,6 +55,19 @@ pub struct HttpRequestLine {
     target: String,
 }
 
+impl HttpRequestLine {
+    fn validate_parameter<'a>(
+        value: Option<&'a str>,
+        name: impl Display,
+    ) -> Result<&'a str, HttpParseError> {
+        match value {
+            Some(v) if !v.is_empty() => Ok(v),
+            Some(_) => Err(HttpParseError::new(format!("{} MUST NOT be empty.", name))),
+            None => Err(HttpParseError::new(format!("{} is required.", name))),
+        }
+    }
+}
+
 impl TryFrom<String> for HttpRequestLine {
     type Error = HttpParseError;
 
@@ -62,29 +76,29 @@ impl TryFrom<String> for HttpRequestLine {
             return Err(HttpParseError::new("Request line does NOT end with CRLF."));
         }
 
-        let value: &str = value.trim_end_matches(CRLF);
-        let mut split = value.split(' ');
-        let parts: Vec<&str> = split.clone().collect();
+        let mut split = value.trim_end_matches(CRLF).split(' ');
 
-        if parts.iter().count() != 3 {
-            return Err(HttpParseError::new("Requst line MUST consist of 3 parts."));
+        let method = HttpRequestLine::validate_parameter(split.next(), "Method")?;
+        let target = HttpRequestLine::validate_parameter(split.next(), "Target")?;
+        let version = HttpRequestLine::validate_parameter(split.next(), "Version")?;
+
+        if split.next().is_some() {
+            return Err(HttpParseError::new("Request line MUST consist of 3 parts."));
         }
 
-        if split.any(|p| p == "") {
-            return Err(HttpParseError::new("Request line part CANNOT be empty."));
+        let method = HttpMethod::try_from(method)?;
+
+        if version != HTTP_VERSION {
+            return Err(HttpParseError::new(format!(
+                "Only {} version is supported.",
+                HTTP_VERSION
+            )));
         }
 
-        let method = HttpMethod::try_from(parts[0])?;
-        let target = parts[1].to_string();
-
-        let http_version = "HTTP/1.1";
-        if parts[2] != http_version {
-            return Err(HttpParseError::new("Only HTTP/1.1 is supported."));
-        }
-
-        let request_line = HttpRequestLine { method, target };
-
-        return Ok(request_line);
+        Ok(HttpRequestLine {
+            method,
+            target: target.to_string(),
+        })
     }
 }
 
@@ -98,45 +112,38 @@ impl TryFrom<String> for HttpHeader {
     type Error = HttpParseError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if !value.contains(':') {
-            return Err(HttpParseError::new("No colon present"));
-        }
-
         let value = value.trim_end_matches(CRLF);
-
-        let split = value.split(':');
-        let parts: Vec<&str> = split.clone().collect();
 
         // this also handles line folding - should return 400 saying that obsolete line folding is unacceptable,
         // since it's been deprecated everywhere other than in message/http
-        if parts.iter().count() != 2 {
+        let Some((name, value)) = value.split_once(':') else {
             return Err(HttpParseError::new(
-                "Header must consist of two parts: name and value",
+                "Header must contain name and value separate by a colon",
             ));
-        }
+        };
 
-        if parts[0].ends_with(" ") {
+        if name.ends_with(' ') {
             return Err(HttpParseError::new(
                 "Header name cannot contain trailing spaces",
             ));
         }
 
-        if parts[1] == "" {
+        let value = value.trim_matches([' ', '\t']);
+
+        if value.is_empty() {
             return Err(HttpParseError::new("Header value cannot be empty"));
         }
 
-        if parts[1].len() > HEADER_VALUE_MAX_LENGTH {
+        if value.len() > HEADER_VALUE_MAX_LENGTH {
             return Err(HttpParseError(format!(
                 "Header value cannot be longer than {}",
                 HEADER_VALUE_MAX_LENGTH
             )));
         }
 
-        let name = parts[0].to_string();
-        let value = parts[1].trim().to_string();
-
-        let header = HttpHeader { name, value };
-
-        Ok(header)
+        Ok(HttpHeader {
+            name: name.to_string(),
+            value: value.to_string(),
+        })
     }
 }
