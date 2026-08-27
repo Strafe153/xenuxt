@@ -1,8 +1,14 @@
-use std::{error::Error, fmt::{self, Display, Formatter}};
+use std::{
+    collections::HashMap,
+    error::Error,
+    fmt::{self, Display, Formatter},
+};
 
-const CRLF: &'static str = "\r\n";
+pub const CRLF: &'static str = "\r\n";
+
 const HTTP_VERSION: &'static str = "HTTP/1.1";
 const HEADER_VALUE_MAX_LENGTH: usize = 8192;
+const NOT_SUPPORTED_HEADERS: [&str; 1] = ["Transfer-Encoding"];
 
 #[derive(Debug)]
 pub struct HttpParseError(String);
@@ -21,15 +27,57 @@ impl Display for HttpParseError {
 
 impl Error for HttpParseError {}
 
-#[derive(Debug)]
-enum HttpMethod {
+// A small representation of some of the most popular status codes, excluding any Information and Redirect codes
+pub enum HttpStatusCode {
+    OK,
+    Created,
+    NoContent,
+    BadRequest,
+    NotFound,
+    MethodNotAllowed,
+    LengthRequired,
+}
+
+impl HttpStatusCode {
+    fn to_response_line(&self) -> Vec<u8> {
+        format!("{} {} {}{}", HTTP_VERSION, self.code(), self.text(), CRLF)
+            .as_bytes()
+            .to_vec()
+    }
+
+    fn code(&self) -> u16 {
+        match self {
+            HttpStatusCode::OK => 200,
+            HttpStatusCode::Created => 201,
+            HttpStatusCode::NoContent => 204,
+            HttpStatusCode::BadRequest => 400,
+            HttpStatusCode::NotFound => 404,
+            HttpStatusCode::MethodNotAllowed => 405,
+            HttpStatusCode::LengthRequired => 411,
+        }
+    }
+
+    fn text(&self) -> &'static str {
+        match self {
+            HttpStatusCode::OK => "OK",
+            HttpStatusCode::Created => "Created",
+            HttpStatusCode::NoContent => "No Content",
+            HttpStatusCode::BadRequest => "Bad Request",
+            HttpStatusCode::NotFound => "Not Found",
+            HttpStatusCode::MethodNotAllowed => "Method Not Allowed",
+            HttpStatusCode::LengthRequired => "Length Required",
+        }
+    }
+}
+
+#[derive(PartialEq)]
+pub enum HttpMethod {
     GET,
     POST,
     PUT,
     PATCH,
     DELETE,
     HEAD,
-    OPTIONS,
 }
 
 impl TryFrom<&str> for HttpMethod {
@@ -43,27 +91,45 @@ impl TryFrom<&str> for HttpMethod {
             "PATCH" => Ok(HttpMethod::PATCH),
             "DELETE" => Ok(HttpMethod::DELETE),
             "HEAD" => Ok(HttpMethod::HEAD),
-            "OPTIONS" => Ok(HttpMethod::OPTIONS),
-            _ => Err(HttpParseError::new("Invalid HTTP method.")),
+            _ => Err(HttpParseError::new("Invalid HTTP method")),
         }
     }
 }
 
-#[derive(Debug)]
+impl From<&HttpMethod> for &'static str {
+    fn from(value: &HttpMethod) -> Self {
+        match value {
+            HttpMethod::GET => "GET",
+            HttpMethod::POST => "POST",
+            HttpMethod::PUT => "PUT",
+            HttpMethod::PATCH => "PATCH",
+            HttpMethod::DELETE => "DELETE",
+            HttpMethod::HEAD => "HEAD",
+        }
+    }
+}
+
 pub struct HttpRequestLine {
-    method: HttpMethod,
-    target: String,
+    pub method: HttpMethod,
+    pub target: String,
 }
 
 impl HttpRequestLine {
+    pub fn requires_body(&self) -> bool {
+        match self.method {
+            HttpMethod::POST | HttpMethod::PUT | HttpMethod::PATCH => true,
+            _ => false,
+        }
+    }
+
     fn validate_parameter<'a>(
         value: Option<&'a str>,
         name: impl Display,
     ) -> Result<&'a str, HttpParseError> {
         match value {
             Some(v) if !v.is_empty() => Ok(v),
-            Some(_) => Err(HttpParseError::new(format!("{} MUST NOT be empty.", name))),
-            None => Err(HttpParseError::new(format!("{} is required.", name))),
+            Some(_) => Err(HttpParseError::new(format!("{} MUST NOT be empty", name))),
+            None => Err(HttpParseError::new(format!("{} is required", name))),
         }
     }
 }
@@ -104,8 +170,17 @@ impl TryFrom<String> for HttpRequestLine {
 
 #[derive(Debug)]
 pub struct HttpHeader {
-    name: String,
-    value: String,
+    pub name: String,
+    pub value: String,
+}
+
+impl HttpHeader {
+    pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+        }
+    }
 }
 
 impl TryFrom<String> for HttpHeader {
@@ -114,13 +189,21 @@ impl TryFrom<String> for HttpHeader {
     fn try_from(value: String) -> Result<Self, Self::Error> {
         let value = value.trim_end_matches(CRLF);
 
-        // this also handles line folding - should return 400 saying that obsolete line folding is unacceptable,
-        // since it's been deprecated everywhere other than in message/http
         let Some((name, value)) = value.split_once(':') else {
             return Err(HttpParseError::new(
-                "Header must contain name and value separate by a colon",
+                "Header must contain name and value separate by a colon. Obsolete line folding is not allowed",
             ));
         };
+
+        if NOT_SUPPORTED_HEADERS
+            .iter()
+            .any(|&h| h.eq_ignore_ascii_case(name))
+        {
+            return Err(HttpParseError::new(format!(
+                "Header \"{}\" is not supported",
+                name
+            )));
+        }
 
         if name.ends_with(' ') {
             return Err(HttpParseError::new(
@@ -145,5 +228,179 @@ impl TryFrom<String> for HttpHeader {
             name: name.to_string(),
             value: value.to_string(),
         })
+    }
+}
+
+impl<'a> From<HttpHeader> for Vec<u8> {
+    fn from(value: HttpHeader) -> Self {
+        format!("{}: {}{}", value.name, value.value, CRLF).into_bytes()
+    }
+}
+
+pub struct HttpBody(Vec<u8>);
+
+impl HttpBody {
+    pub fn new(value: Vec<u8>) -> Self {
+        Self(value)
+    }
+
+    pub fn value(self) -> Vec<u8> {
+        self.0
+    }
+}
+
+pub struct HttpResponse {
+    status: HttpStatusCode,
+    headers: Option<Vec<HttpHeader>>,
+    body: Option<Vec<u8>>,
+}
+
+impl HttpResponse {
+    pub fn ok(headers: Option<Vec<HttpHeader>>, body: Option<Vec<u8>>) -> Self {
+        Self::new(HttpStatusCode::OK, headers, body)
+    }
+
+    pub fn created(headers: Option<Vec<HttpHeader>>, body: Option<Vec<u8>>) -> Self {
+        Self::new(HttpStatusCode::Created, headers, body)
+    }
+
+    pub fn no_content(headers: Option<Vec<HttpHeader>>) -> Self {
+        Self::new(HttpStatusCode::NoContent, headers, None)
+    }
+
+    pub fn bad_request(headers: Option<Vec<HttpHeader>>, body: Option<Vec<u8>>) -> Self {
+        Self::new(HttpStatusCode::BadRequest, headers, body)
+    }
+
+    pub fn error_bad_request(error: impl Into<String>) -> Self {
+        let body = format!(
+                "{{\r\n\t\"error\": \"{}\"\r\n}}\r\n",
+                error.into()
+            )
+            .as_bytes()
+            .to_vec();
+
+        Self::new(HttpStatusCode::BadRequest, None, Some(body))
+    }
+
+    pub fn not_found(headers: Option<Vec<HttpHeader>>, body: Option<Vec<u8>>) -> Self {
+        Self::new(HttpStatusCode::NotFound, headers, body)
+    }
+
+    pub fn method_not_allowed(method: &HttpMethod) -> Self {
+        let method: &'static str = method.into();
+        let headers = vec![HttpHeader::new("Allow", method)];
+
+        Self::new(HttpStatusCode::MethodNotAllowed, Some(headers), None)
+    }
+
+    pub fn length_required() -> HttpResponse {
+        HttpResponse::new(HttpStatusCode::LengthRequired, None, None)
+    }
+
+    fn new(
+        status: HttpStatusCode,
+        headers: Option<Vec<HttpHeader>>,
+        body: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            status,
+            headers,
+            body,
+        }
+    }
+}
+
+impl From<HttpResponse> for Vec<u8> {
+    fn from(value: HttpResponse) -> Self {
+        let mut result: Vec<u8> = Vec::new();
+
+        let response_line = value.status.to_response_line();
+        result.extend_from_slice(&response_line);
+
+        if let Some(headers) = value.headers {
+            for h in headers {
+                result.append(&mut h.into());
+            }
+        }
+
+        match value.body {
+            Some(b) => {
+                let mut content_type = HttpHeader::new("Content-Type", "application/json").into();
+                result.append(&mut content_type);
+
+                let content_length = format!("Content-Length: {}\r\n", b.len());
+                result.extend_from_slice(&content_length.as_bytes());
+
+                result.extend_from_slice(b"\r\n");
+                result.extend_from_slice(&b);
+            }
+            None => {
+                let content_length = format!("Content-Length: {}\r\n", 0);
+                result.extend_from_slice(&content_length.as_bytes());
+                result.extend_from_slice(b"\r\n");
+            }
+        }
+
+        result
+    }
+}
+
+type HttpHandlerFn = dyn Fn(Option<Vec<u8>>) -> HttpResponse;
+
+pub struct HttpHandlerInfo {
+    method: HttpMethod,
+    handler: Box<HttpHandlerFn>,
+}
+
+pub enum HttpHandler<'a> {
+    Found(&'a HttpHandlerFn),
+    MethodNotAllowed(&'a HttpMethod),
+    NotFound,
+}
+
+pub struct HttpHandlerStore(HashMap<String, HttpHandlerInfo>);
+
+impl HttpHandlerStore {
+    pub fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    pub fn register<F>(
+        &mut self,
+        path: impl Into<String>,
+        method: HttpMethod,
+        handler: F,
+    ) -> Result<(), std::io::Error>
+    where
+        F: 'static + Fn(Option<Vec<u8>>) -> HttpResponse,
+    {
+        let path = path.into();
+
+        // allow having several handlers for the same path with different methods - for that change value to Vec<HttpHandlerInfo>
+        // use a proper error instead of this placeholder
+        if self.0.iter().any(|h| *h.0 == path) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                "There is already a handler for this path",
+            ));
+        }
+
+        let info = HttpHandlerInfo {
+            method,
+            handler: Box::new(handler),
+        };
+
+        self.0.insert(path, info);
+
+        Ok(())
+    }
+
+    pub fn get(&self, req: HttpRequestLine) -> HttpHandler<'_> {
+        match self.0.get(&req.target) {
+            Some(h) if req.method != h.method => HttpHandler::MethodNotAllowed(&h.method),
+            Some(h) => HttpHandler::Found(&h.handler),
+            None => HttpHandler::NotFound,
+        }
     }
 }
