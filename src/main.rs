@@ -30,15 +30,15 @@ fn get_port() -> u16 {
 }
 
 // maybe use serde_json for serialization
-fn register_handlers(store: &mut HttpHandlerStore) -> Result<(), std::io::Error> {
-    store.register("/", HttpMethod::GET, |_, _| {
+fn register_handlers(store: &mut HttpHandlerStore) -> Result<(), HandlerRegistrationError> {
+    store.register("/", HttpMethod::GET, |_| {
         HttpResponse::ok(
             None,
             Some("{\r\n\t\"response\": \"test\"\r\n}\r\n".as_bytes().to_vec()),
         )
     })?;
 
-    store.register("/bad", HttpMethod::POST, |_, _| {
+    store.register("/bad", HttpMethod::POST, |_| {
         HttpResponse::bad_request(
             None,
             Some(
@@ -113,12 +113,12 @@ fn listen(port: u16, store: &HttpHandlerStore) {
             continue;
         };
 
-        let Ok(request_line) = HttpRequestLine::try_from(request_line) else {
-            write(
-                &mut writer,
-                HttpResponse::bad_request_err("Failed to parse the request line"),
-            );
-            continue;
+        let request_line = match HttpRequestLine::try_from(request_line) {
+            Ok(line) => line,
+            Err(e) => {
+                write(&mut writer, HttpResponse::bad_request_err(e.to_string()));
+                continue;
+            }
         };
 
         match read_request_headers(&mut reader) {
@@ -170,7 +170,9 @@ fn handle_request(
     match store.get(request_line) {
         HttpHandler::Found(handler) => {
             let body = HttpBody::new(body).value();
-            write(writer, handler(Some(headers), Some(body)));
+            let payload = RequestPayload::new(Some(headers), None, Some(body));
+
+            write(writer, handler(payload));
         }
         HttpHandler::MethodNotAllowed(method) => {
             write(writer, HttpResponse::method_not_allowed(method))

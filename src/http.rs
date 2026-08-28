@@ -32,6 +32,23 @@ impl Display for HttpParseError {
 
 impl Error for HttpParseError {}
 
+#[derive(Debug)]
+pub struct HandlerRegistrationError(String);
+
+impl HandlerRegistrationError {
+    fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl Display for HandlerRegistrationError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Error for HandlerRegistrationError {}
+
 // A small representation of some of the most popular status codes,
 // excluding any Information and Redirect codes
 pub enum HttpStatusCode {
@@ -153,6 +170,11 @@ impl TryFrom<String> for HttpRequestLine {
         let method = HttpRequestLine::validate_parameter(split.next(), "Method")?;
         let target = HttpRequestLine::validate_parameter(split.next(), "Target")?;
         let version = HttpRequestLine::validate_parameter(split.next(), "Version")?;
+
+        // also possibly reject nonalphanumeric characters except for ? and /
+        if !target.starts_with('/') {
+            return Err(HttpParseError::new("Request target MUST start with a '/'"));
+        }
 
         if split.next().is_some() {
             return Err(HttpParseError::new("Request line MUST consist of 3 parts."));
@@ -354,9 +376,29 @@ impl From<HttpResponse> for Vec<u8> {
     }
 }
 
-type HttpHandlerFn = dyn 'static + Fn(Option<Vec<HttpHeader>>, Option<Vec<u8>>) -> HttpResponse;
+pub struct RequestPayload {
+    pub headers: Option<Vec<HttpHeader>>,
+    pub query_params: Option<HashMap<String, String>>,
+    pub body: Option<Vec<u8>>,
+}
 
-pub struct HttpHandlerInfo {
+impl RequestPayload {
+    pub fn new(
+        headers: Option<Vec<HttpHeader>>,
+        query_params: Option<HashMap<String, String>>,
+        body: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            headers,
+            query_params,
+            body,
+        }
+    }
+}
+
+type HttpHandlerFn = dyn 'static + Fn(RequestPayload) -> HttpResponse;
+
+struct HandlerInfo {
     method: HttpMethod,
     handler: Box<HttpHandlerFn>,
 }
@@ -367,7 +409,7 @@ pub enum HttpHandler<'a> {
     NotFound,
 }
 
-pub struct HttpHandlerStore(HashMap<String, HttpHandlerInfo>);
+pub struct HttpHandlerStore(HashMap<String, HandlerInfo>);
 
 impl HttpHandlerStore {
     pub fn new() -> Self {
@@ -379,22 +421,27 @@ impl HttpHandlerStore {
         path: impl Into<String>,
         method: HttpMethod,
         handler: F,
-    ) -> Result<(), std::io::Error>
+    ) -> Result<(), HandlerRegistrationError>
     where
-        F: 'static + Fn(Option<Vec<HttpHeader>>, Option<Vec<u8>>) -> HttpResponse,
+        F: 'static + Fn(RequestPayload) -> HttpResponse,
     {
         let path = path.into();
+
+        // use a proper error instead of this placeholder
+        // also, most likely add check to reject nonalphanumeric symbols except for ? and /
+        if !path.starts_with('/') {
+            return Err(HandlerRegistrationError::new("The path must start with '/'"));
+        }
 
         // allow having several handlers for the same path with different methods - for that change value to Vec<HttpHandlerInfo>
         // use a proper error instead of this placeholder
         if self.0.iter().any(|h| *h.0 == path) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AddrInUse,
+            return Err(HandlerRegistrationError::new(
                 "There is already a handler for this path",
             ));
         }
 
-        let info = HttpHandlerInfo {
+        let info = HandlerInfo {
             method,
             handler: Box::new(handler),
         };
