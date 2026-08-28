@@ -5,7 +5,7 @@
             "name": "Debug Rust",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/target/debug/web_server",
+            "program": "${workspaceFolder}/target/debug/xenuxt",
             "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
