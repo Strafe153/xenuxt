@@ -5,11 +5,13 @@ use std::{
 };
 
 pub const CRLF: &'static str = "\r\n";
-pub const CONTENT_LENGTH_HEADER: &'static str = "Content-Length";
+pub const CONTENT_LENGTH: &'static str = "Content-Length";
 
 const HTTP_VERSION: &'static str = "HTTP/1.1";
 const HEADER_VALUE_MAX_LENGTH: usize = 8192;
 const NOT_SUPPORTED_HEADERS: [&str; 1] = ["Transfer-Encoding"];
+const CONTENT_TYPE: &'static str = "Content-Type";
+const APPLICATION_JSON: &'static str = "application/json";
 const APPLICATION_JSON_CONTENT_TYPE: &'static [u8; 32] = b"Content-Type: application/json\r\n";
 const EMPTY_CONTENT_LENGTH: &'static [u8; 19] = b"Content-Length: 0\r\n";
 
@@ -228,6 +230,13 @@ impl TryFrom<String> for HttpHeader {
             )));
         }
 
+        if name == CONTENT_TYPE && value != APPLICATION_JSON {
+            return Err(HttpParseError::new(format!(
+                "Only \"{}\" is supported for \"{}\"",
+                APPLICATION_JSON, CONTENT_TYPE
+            )));
+        }
+
         Ok(HttpHeader {
             name: name.to_string(),
             value: value.to_string(),
@@ -329,7 +338,7 @@ impl From<HttpResponse> for Vec<u8> {
             Some(b) => {
                 response.extend_from_slice(APPLICATION_JSON_CONTENT_TYPE);
 
-                let content_length = format!("{}: {}{}", CONTENT_LENGTH_HEADER, b.len(), CRLF);
+                let content_length = format!("{}: {}{}", CONTENT_LENGTH, b.len(), CRLF);
                 response.extend_from_slice(&content_length.as_bytes());
 
                 response.extend_from_slice(CRLF.as_bytes());

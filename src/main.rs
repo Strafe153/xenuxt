@@ -31,16 +31,16 @@ fn get_port() -> u16 {
 
 // maybe use serde_json for serialization
 fn register_handlers(store: &mut HttpHandlerStore) -> Result<(), std::io::Error> {
-    store.register("/", HttpMethod::GET, |headers, _| {
+    store.register("/", HttpMethod::GET, |_, _| {
         HttpResponse::ok(
-            headers,
+            None,
             Some("{\r\n\t\"response\": \"test\"\r\n}\r\n".as_bytes().to_vec()),
         )
     })?;
 
-    store.register("/bad", HttpMethod::POST, |headers, _| {
+    store.register("/bad", HttpMethod::POST, |_, _| {
         HttpResponse::bad_request(
-            headers,
+            None,
             Some(
                 "{\r\n\t\"response\": \"bad request\"\r\n}\r\n"
                     .as_bytes()
@@ -141,7 +141,7 @@ fn handle_request(
 ) {
     let content_length = headers
         .iter()
-        .find(|&h| h.name.as_str().eq_ignore_ascii_case(CONTENT_LENGTH_HEADER));
+        .find(|&h| h.name.as_str().eq_ignore_ascii_case(CONTENT_LENGTH));
 
     let Some(content_length) = content_length else {
         if request_line.requires_body() {
@@ -154,10 +154,7 @@ fn handle_request(
     let Ok(size) = content_length.value.parse::<usize>() else {
         write(
             writer,
-            HttpResponse::bad_request_err(format!(
-                "\"{}\" value MUST be numeric",
-                CONTENT_LENGTH_HEADER
-            )),
+            HttpResponse::bad_request_err(format!("\"{}\" value MUST be numeric", CONTENT_LENGTH)),
         );
         return;
     };
