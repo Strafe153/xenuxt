@@ -5,10 +5,13 @@ use std::{
 };
 
 pub const CRLF: &'static str = "\r\n";
+pub const CONTENT_LENGTH_HEADER: &'static str = "Content-Length";
 
 const HTTP_VERSION: &'static str = "HTTP/1.1";
 const HEADER_VALUE_MAX_LENGTH: usize = 8192;
 const NOT_SUPPORTED_HEADERS: [&str; 1] = ["Transfer-Encoding"];
+const APPLICATION_JSON_CONTENT_TYPE: &'static [u8; 32] = b"Content-Type: application/json\r\n";
+const EMPTY_CONTENT_LENGTH: &'static [u8; 19] = b"Content-Length: 0\r\n";
 
 #[derive(Debug)]
 pub struct HttpParseError(String);
@@ -27,7 +30,8 @@ impl Display for HttpParseError {
 
 impl Error for HttpParseError {}
 
-// A small representation of some of the most popular status codes, excluding any Information and Redirect codes
+// A small representation of some of the most popular status codes,
+// excluding any Information and Redirect codes
 pub enum HttpStatusCode {
     OK,
     Created,
@@ -110,8 +114,8 @@ impl From<&HttpMethod> for &'static str {
 }
 
 pub struct HttpRequestLine {
-    pub method: HttpMethod,
-    pub target: String,
+    method: HttpMethod,
+    target: String,
 }
 
 impl HttpRequestLine {
@@ -272,11 +276,8 @@ impl HttpResponse {
         Self::new(HttpStatusCode::BadRequest, headers, body)
     }
 
-    pub fn error_bad_request(error: impl Into<String>) -> Self {
-        let body = format!(
-                "{{\r\n\t\"error\": \"{}\"\r\n}}\r\n",
-                error.into()
-            )
+    pub fn bad_request_err(error: impl Into<String>) -> Self {
+        let body = format!("{{\r\n\t\"error\": \"{}\"\r\n}}\r\n", error.into())
             .as_bytes()
             .to_vec();
 
@@ -313,40 +314,38 @@ impl HttpResponse {
 
 impl From<HttpResponse> for Vec<u8> {
     fn from(value: HttpResponse) -> Self {
-        let mut result: Vec<u8> = Vec::new();
+        let mut response = Vec::new();
 
         let response_line = value.status.to_response_line();
-        result.extend_from_slice(&response_line);
+        response.extend_from_slice(&response_line);
 
-        if let Some(headers) = value.headers {
-            for h in headers {
-                result.append(&mut h.into());
-            }
-        }
+        value
+            .headers
+            .into_iter()
+            .flatten()
+            .for_each(|h| response.extend_from_slice(&Vec::<u8>::from(h)));
 
         match value.body {
             Some(b) => {
-                let mut content_type = HttpHeader::new("Content-Type", "application/json").into();
-                result.append(&mut content_type);
+                response.extend_from_slice(APPLICATION_JSON_CONTENT_TYPE);
 
-                let content_length = format!("Content-Length: {}\r\n", b.len());
-                result.extend_from_slice(&content_length.as_bytes());
+                let content_length = format!("{}: {}{}", CONTENT_LENGTH_HEADER, b.len(), CRLF);
+                response.extend_from_slice(&content_length.as_bytes());
 
-                result.extend_from_slice(b"\r\n");
-                result.extend_from_slice(&b);
+                response.extend_from_slice(CRLF.as_bytes());
+                response.extend_from_slice(&b);
             }
             None => {
-                let content_length = format!("Content-Length: {}\r\n", 0);
-                result.extend_from_slice(&content_length.as_bytes());
-                result.extend_from_slice(b"\r\n");
+                response.extend_from_slice(EMPTY_CONTENT_LENGTH);
+                response.extend_from_slice(CRLF.as_bytes());
             }
         }
 
-        result
+        response
     }
 }
 
-type HttpHandlerFn = dyn Fn(Option<Vec<u8>>) -> HttpResponse;
+type HttpHandlerFn = dyn 'static + Fn(Option<Vec<HttpHeader>>, Option<Vec<u8>>) -> HttpResponse;
 
 pub struct HttpHandlerInfo {
     method: HttpMethod,
@@ -373,7 +372,7 @@ impl HttpHandlerStore {
         handler: F,
     ) -> Result<(), std::io::Error>
     where
-        F: 'static + Fn(Option<Vec<u8>>) -> HttpResponse,
+        F: 'static + Fn(Option<Vec<HttpHeader>>, Option<Vec<u8>>) -> HttpResponse,
     {
         let path = path.into();
 
