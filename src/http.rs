@@ -9,12 +9,11 @@ pub const CONTENT_LENGTH: &'static str = "Content-Length";
 
 const HTTP_VERSION: &'static str = "HTTP/1.1";
 const HEADER_VALUE_MAX_LENGTH: usize = 8192;
-const NOT_SUPPORTED_HEADERS: [&str; 1] = ["Transfer-Encoding"];
 const CONTENT_TYPE: &'static str = "Content-Type";
 const APPLICATION_JSON: &'static str = "application/json";
-const APPLICATION_JSON_CONTENT_TYPE: &'static [u8; 32] = b"Content-Type: application/json\r\n";
-const EMPTY_CONTENT_LENGTH: &'static [u8; 19] = b"Content-Length: 0\r\n";
+const UNSUPPORTED_HEADERS: [&str; 1] = ["Transfer-Encoding"];
 
+// potentially unify all http errors under and enum
 #[derive(Debug)]
 pub struct HttpParseError(String);
 
@@ -31,23 +30,6 @@ impl Display for HttpParseError {
 }
 
 impl Error for HttpParseError {}
-
-#[derive(Debug)]
-pub struct HandlerRegistrationError(String);
-
-impl HandlerRegistrationError {
-    fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
-    }
-}
-
-impl Display for HandlerRegistrationError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl Error for HandlerRegistrationError {}
 
 // A small representation of some of the most popular status codes,
 // excluding any Information and Redirect codes
@@ -93,7 +75,7 @@ impl HttpStatusCode {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy)]
 pub enum HttpMethod {
     GET,
     POST,
@@ -133,6 +115,7 @@ impl From<&HttpMethod> for &'static str {
 }
 
 pub struct HttpRequestLine {
+    pub query_string: Option<String>,
     method: HttpMethod,
     target: String,
 }
@@ -168,12 +151,20 @@ impl TryFrom<String> for HttpRequestLine {
         let mut split = value.trim_end_matches(CRLF).split(' ');
 
         let method = HttpRequestLine::validate_parameter(split.next(), "Method")?;
-        let target = HttpRequestLine::validate_parameter(split.next(), "Target")?;
+        let mut target = HttpRequestLine::validate_parameter(split.next(), "Target")?;
         let version = HttpRequestLine::validate_parameter(split.next(), "Version")?;
 
-        // also possibly reject nonalphanumeric characters except for ? and /
         if !target.starts_with('/') {
             return Err(HttpParseError::new("Request target MUST start with a '/'"));
+        }
+
+        let mut query_string: Option<String> = None;
+
+        // Current implementation simply passes the query string downstream,
+        // offloading the parsing and validation onto the user
+        if let Some((path, query)) = target.split_once('?') {
+            target = path;
+            query_string = Some(query.to_string());
         }
 
         if split.next().is_some() {
@@ -192,6 +183,7 @@ impl TryFrom<String> for HttpRequestLine {
         Ok(HttpRequestLine {
             method,
             target: target.to_string(),
+            query_string,
         })
     }
 }
@@ -223,7 +215,7 @@ impl TryFrom<String> for HttpHeader {
             ));
         };
 
-        if NOT_SUPPORTED_HEADERS
+        if UNSUPPORTED_HEADERS
             .iter()
             .any(|&h| h.eq_ignore_ascii_case(name))
         {
@@ -252,13 +244,6 @@ impl TryFrom<String> for HttpHeader {
             )));
         }
 
-        if name == CONTENT_TYPE && value != APPLICATION_JSON {
-            return Err(HttpParseError::new(format!(
-                "Only \"{}\" is supported for \"{}\"",
-                APPLICATION_JSON, CONTENT_TYPE
-            )));
-        }
-
         Ok(HttpHeader {
             name: name.to_string(),
             value: value.to_string(),
@@ -270,6 +255,131 @@ impl<'a> From<HttpHeader> for Vec<u8> {
     fn from(value: HttpHeader) -> Self {
         format!("{}: {}{}", value.name, value.value, CRLF).into_bytes()
     }
+}
+
+const HOST_HEADER: &'static str = "Host";
+const LOCALHOST: &'static str = "localhost";
+const LOCALHOST_IP_V4: &'static str = "127.0.0.1";
+fn validate_host_header(headers: &[HttpHeader], port: u16) -> Result<(), HttpValidationError> {
+    let host_count = headers
+        .iter()
+        .filter(|&h| h.name.as_str().eq_ignore_ascii_case(HOST_HEADER))
+        .count();
+
+    if host_count > 1 {
+        return Err(HttpValidationError::new(format!(
+            "Only one '{}' header is allowed",
+            HOST_HEADER
+        )));
+    }
+
+    let host = headers
+        .iter()
+        .find(|&h| h.name.as_str().eq_ignore_ascii_case(HOST_HEADER));
+
+    match host {
+        Some(h) => {
+            if !h.value.starts_with(LOCALHOST) && !h.value.starts_with(LOCALHOST_IP_V4) {
+                return Err(HttpValidationError::new(format!(
+                    "Host MUST be either {} or {}",
+                    LOCALHOST, LOCALHOST_IP_V4
+                )));
+            }
+
+            match h.value.split_once(':') {
+                Some((_, p)) => {
+                    match p.parse::<u16>() {
+                        Ok(p) => {
+                            if p != port {
+                                return Err(HttpValidationError::new("Incorrect port"));
+                            }
+
+                            return Ok(());
+                        }
+                        Err(_) => {
+                            return Err(HttpValidationError::new(""));
+                        }
+                    };
+                }
+                None => {
+                    if port != 80 {
+                        return Err(HttpValidationError::new("Incorrect port"));
+                    }
+
+                    Ok(())
+                }
+            }
+        }
+        None => {
+            return Err(HttpValidationError::new("Host header is required"));
+        }
+    }
+}
+
+fn validate_not_supported_header(
+    headers: &[HttpHeader],
+    header: &str,
+) -> Result<(), HttpValidationError> {
+    let transfer_encoding = headers
+        .iter()
+        .find(|&h| h.name.as_str().eq_ignore_ascii_case(header));
+
+    match transfer_encoding {
+        Some(_) => Err(HttpValidationError::new(format!("{} is not supported", header))),
+        None => Ok(()),
+    }
+}
+
+fn validate_transfer_encoding_header(headers: &[HttpHeader]) -> Result<(), HttpValidationError> {
+    validate_not_supported_header(headers, "Transfer-Encoding")
+}
+
+fn validate_content_type_header(headers: &[HttpHeader]) -> Result<(), HttpValidationError> {
+    let header = headers
+        .iter()
+        .find(|&h| h.name.as_str().eq_ignore_ascii_case(CONTENT_TYPE));
+
+    match header {
+        Some(header) => {
+            if header.name == CONTENT_TYPE && header.value != APPLICATION_JSON {
+                return Err(HttpValidationError::new(format!(
+                    "Only '{}' is supported for '{}'",
+                    APPLICATION_JSON, CONTENT_TYPE
+                )));
+            }
+
+            return Ok(());
+        }
+        None => {}
+    }
+
+    Ok(())
+}
+
+#[derive(Debug)]
+pub struct HttpValidationError(String);
+
+impl HttpValidationError {
+    fn new(error: impl Into<String>) -> Self {
+        Self(error.into())
+    }
+}
+
+impl Display for HttpValidationError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Error for HttpValidationError {}
+
+// most likely refactor, since I don't like how validation works as of now
+pub fn validate_headers(headers: &[HttpHeader], port: u16) -> Result<(), HttpValidationError> {
+    validate_host_header(headers, port)?;
+    validate_transfer_encoding_header(headers)?;
+    validate_content_type_header(headers)?;
+
+    Ok(())
 }
 
 pub struct HttpBody(Vec<u8>);
@@ -319,9 +429,14 @@ impl HttpResponse {
         Self::new(HttpStatusCode::NotFound, headers, body)
     }
 
-    pub fn method_not_allowed(method: &HttpMethod) -> Self {
-        let method: &'static str = method.into();
-        let headers = vec![HttpHeader::new("Allow", method)];
+    pub fn method_not_allowed(methods: Vec<HttpMethod>) -> Self {
+        let methods = methods
+            .iter()
+            .map(|m| m.into())
+            .collect::<Vec<&'static str>>()
+            .join(", ");
+
+        let headers = vec![HttpHeader::new("Allow", methods)];
 
         Self::new(HttpStatusCode::MethodNotAllowed, Some(headers), None)
     }
@@ -358,7 +473,7 @@ impl From<HttpResponse> for Vec<u8> {
 
         match value.body {
             Some(b) => {
-                response.extend_from_slice(APPLICATION_JSON_CONTENT_TYPE);
+                response.extend_from_slice(b"Content-Type: application/json\r\n");
 
                 let content_length = format!("{}: {}{}", CONTENT_LENGTH, b.len(), CRLF);
                 response.extend_from_slice(&content_length.as_bytes());
@@ -367,7 +482,7 @@ impl From<HttpResponse> for Vec<u8> {
                 response.extend_from_slice(&b);
             }
             None => {
-                response.extend_from_slice(EMPTY_CONTENT_LENGTH);
+                response.extend_from_slice(b"Content-Length: 0\r\n");
                 response.extend_from_slice(CRLF.as_bytes());
             }
         }
@@ -378,20 +493,20 @@ impl From<HttpResponse> for Vec<u8> {
 
 pub struct RequestPayload {
     pub headers: Option<Vec<HttpHeader>>,
-    pub query_params: Option<HashMap<String, String>>,
     pub body: Option<Vec<u8>>,
+    pub query_string: Option<String>,
 }
 
 impl RequestPayload {
     pub fn new(
         headers: Option<Vec<HttpHeader>>,
-        query_params: Option<HashMap<String, String>>,
         body: Option<Vec<u8>>,
+        query_string: Option<String>,
     ) -> Self {
         Self {
             headers,
-            query_params,
             body,
+            query_string,
         }
     }
 }
@@ -405,11 +520,28 @@ struct HandlerInfo {
 
 pub enum HttpHandler<'a> {
     Found(&'a HttpHandlerFn),
-    MethodNotAllowed(&'a HttpMethod),
+    MethodNotAllowed(Vec<HttpMethod>),
     NotFound,
 }
 
-pub struct HttpHandlerStore(HashMap<String, HandlerInfo>);
+#[derive(Debug)]
+pub struct HandlerRegistrationError(String);
+
+impl HandlerRegistrationError {
+    fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl Display for HandlerRegistrationError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Error for HandlerRegistrationError {}
+
+pub struct HttpHandlerStore(HashMap<String, Vec<HandlerInfo>>);
 
 impl HttpHandlerStore {
     pub fn new() -> Self {
@@ -427,15 +559,18 @@ impl HttpHandlerStore {
     {
         let path = path.into();
 
-        // use a proper error instead of this placeholder
-        // also, most likely add check to reject nonalphanumeric symbols except for ? and /
         if !path.starts_with('/') {
-            return Err(HandlerRegistrationError::new("The path must start with '/'"));
+            return Err(HandlerRegistrationError::new(
+                "The path must start with '/'",
+            ));
         }
 
-        // allow having several handlers for the same path with different methods - for that change value to Vec<HttpHandlerInfo>
-        // use a proper error instead of this placeholder
-        if self.0.iter().any(|h| *h.0 == path) {
+        let handler_exists = self.0.iter().any(|(p, handlers)| {
+            let same_method_handler_exists = handlers.iter().any(|i| i.method == method);
+            return *p == path && same_method_handler_exists;
+        });
+
+        if handler_exists {
             return Err(HandlerRegistrationError::new(
                 "There is already a handler for this path",
             ));
@@ -446,16 +581,30 @@ impl HttpHandlerStore {
             handler: Box::new(handler),
         };
 
-        self.0.insert(path, info);
+        match self.0.get_mut(&path) {
+            Some(v) => v.push(info),
+            None => {
+                self.0.insert(path, vec![info]);
+            }
+        }
 
         Ok(())
     }
 
-    pub fn get(&self, req: HttpRequestLine) -> HttpHandler<'_> {
+    pub fn get(&self, req: &HttpRequestLine) -> HttpHandler<'_> {
         match self.0.get(&req.target) {
-            Some(h) if req.method != h.method => HttpHandler::MethodNotAllowed(&h.method),
-            Some(h) => HttpHandler::Found(&h.handler),
-            None => HttpHandler::NotFound,
+            Some(handlers) => {
+                let handler = handlers.iter().find(|h| h.method == req.method);
+
+                match handler {
+                    Some(info) => return HttpHandler::Found(&info.handler),
+                    None => {
+                        let methods: Vec<HttpMethod> = handlers.iter().map(|i| i.method).collect();
+                        return HttpHandler::MethodNotAllowed(methods);
+                    }
+                }
+            }
+            None => return HttpHandler::NotFound,
         }
     }
 }

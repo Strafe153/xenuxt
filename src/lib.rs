@@ -1,55 +1,27 @@
-mod http;
+pub mod http;
+
 mod reader;
 mod writer;
 
-use std::{env, net::TcpListener};
+use std::net::TcpListener;
 
 use crate::{http::*, reader::Reader, writer::Writer};
 
-// TODO: add support for query and route parameters
-
-fn main() {
-    let port = get_port();
-
-    let mut store = HttpHandlerStore::new();
-    register_handlers(&mut store).expect("Failed to register handlers");
-
-    listen(port, &store);
+pub fn run(store: HttpHandlerStore) {
+    run_on_port(3017, store)
 }
 
-fn get_port() -> u16 {
-    match env::args().nth(1) {
-        Some(p) => match p.parse::<u16>() {
-            Ok(p) => p,
-            Err(_) => {
-                panic!("Invalid port: {}", p);
-            }
-        },
-        None => 1717,
-    }
+pub fn run_on_port(port: u16, store: HttpHandlerStore) {
+    let listener = bind_listener(port);
+
+    println!("Listening on port {}...", port);
+
+    listen(listener, store, port);
 }
 
-// maybe use serde_json for serialization
-fn register_handlers(store: &mut HttpHandlerStore) -> Result<(), HandlerRegistrationError> {
-    store.register("/", HttpMethod::GET, |_| {
-        HttpResponse::ok(
-            None,
-            Some("{\r\n\t\"response\": \"test\"\r\n}\r\n".as_bytes().to_vec()),
-        )
-    })?;
-
-    store.register("/bad", HttpMethod::POST, |_| {
-        HttpResponse::bad_request(
-            None,
-            Some(
-                "{\r\n\t\"response\": \"bad request\"\r\n}\r\n"
-                    .as_bytes()
-                    .to_vec(),
-            ),
-        )
-    })?;
-
-    Ok(())
+fn bind_listener(port: u16) -> TcpListener {
+    TcpListener::bind(("127.0.0.1", port))
+        .unwrap_or_else(|_| panic!("Failed to bind to TCP port {}", port))
 }
 
 fn read_request_headers(reader: &mut Reader) -> Result<Vec<HttpHeader>, String> {
@@ -80,16 +52,7 @@ fn write(writer: &mut Writer, response: HttpResponse) {
     }
 }
 
-fn bind_listener(port: u16) -> TcpListener {
-    TcpListener::bind(("127.0.0.1", port))
-        .unwrap_or_else(|_| panic!("Failed to bind to TCP port {}", port))
-}
-
-fn listen(port: u16, store: &HttpHandlerStore) {
-    let listener = bind_listener(port);
-
-    println!("Listening on port {}...", port);
-
+pub fn listen(listener: TcpListener, store: HttpHandlerStore, port: u16) {
     // add support for multiple clients
     for stream in listener.incoming() {
         let Ok(stream) = stream else {
@@ -121,14 +84,20 @@ fn listen(port: u16, store: &HttpHandlerStore) {
             }
         };
 
-        match read_request_headers(&mut reader) {
-            Ok(headers) => {
-                handle_request(request_line, headers, &mut reader, &mut writer, &store);
-            }
-            Err(e) => {
-                write(&mut writer, HttpResponse::bad_request_err(e));
-            }
+        let Ok(headers) = read_request_headers(&mut reader) else {
+            write(
+                &mut writer,
+                HttpResponse::bad_request_err("Failed to read request headers"),
+            );
+            continue;
+        };
+
+        if let Err(e) = validate_headers(&headers, port) {
+            write(&mut writer, HttpResponse::bad_request_err(e.to_string()));
+            continue;
         }
+
+        handle_request(request_line, headers, &mut reader, &mut writer, &store);
     }
 }
 
@@ -139,6 +108,8 @@ fn handle_request(
     writer: &mut Writer,
     store: &HttpHandlerStore,
 ) {
+    // most likely move  this into the header validation logic
+    // with the validations returning headers or something
     let content_length = headers
         .iter()
         .find(|&h| h.name.as_str().eq_ignore_ascii_case(CONTENT_LENGTH));
@@ -154,7 +125,7 @@ fn handle_request(
     let Ok(size) = content_length.value.parse::<usize>() else {
         write(
             writer,
-            HttpResponse::bad_request_err(format!("\"{}\" value MUST be numeric", CONTENT_LENGTH)),
+            HttpResponse::bad_request_err(format!("'{}' value MUST be numeric", CONTENT_LENGTH)),
         );
         return;
     };
@@ -167,10 +138,10 @@ fn handle_request(
         return;
     };
 
-    match store.get(request_line) {
+    match store.get(&request_line) {
         HttpHandler::Found(handler) => {
             let body = HttpBody::new(body).value();
-            let payload = RequestPayload::new(Some(headers), None, Some(body));
+            let payload = RequestPayload::new(Some(headers), Some(body), request_line.query_string);
 
             write(writer, handler(payload));
         }
