@@ -11,7 +11,7 @@ const HTTP_VERSION: &'static str = "HTTP/1.1";
 const HEADER_VALUE_MAX_LENGTH: usize = 8192;
 const CONTENT_TYPE: &'static str = "Content-Type";
 const APPLICATION_JSON: &'static str = "application/json";
-const UNSUPPORTED_HEADERS: [&str; 1] = ["Transfer-Encoding"];
+const UNSUPPORTED_HEADERS: [&str; 2] = ["Transfer-Encoding", "Connection"];
 
 // potentially unify all http errors under and enum
 #[derive(Debug)]
@@ -215,16 +215,6 @@ impl TryFrom<String> for HttpHeader {
             ));
         };
 
-        if UNSUPPORTED_HEADERS
-            .iter()
-            .any(|&h| h.eq_ignore_ascii_case(name))
-        {
-            return Err(HttpParseError::new(format!(
-                "Header \"{}\" is not supported",
-                name
-            )));
-        }
-
         if name.ends_with(' ') {
             return Err(HttpParseError::new(
                 "Header name cannot contain trailing spaces",
@@ -316,22 +306,16 @@ fn validate_host_header(headers: &[HttpHeader], port: u16) -> Result<(), HttpVal
     }
 }
 
-fn validate_not_supported_header(
-    headers: &[HttpHeader],
-    header: &str,
-) -> Result<(), HttpValidationError> {
-    let transfer_encoding = headers
+fn validate_unsupported_headers(headers: &[HttpHeader]) -> Result<(), HttpValidationError> {
+    let unsupported_header = headers
         .iter()
-        .find(|&h| h.name.as_str().eq_ignore_ascii_case(header));
+        .find(|h| UNSUPPORTED_HEADERS.contains(&h.name.as_str()));
 
-    match transfer_encoding {
-        Some(_) => Err(HttpValidationError::new(format!("{} is not supported", header))),
-        None => Ok(()),
+    if let Some(h) = unsupported_header {
+        return Err(HttpValidationError::new(format!("{} is NOT supported", h.name)));
     }
-}
 
-fn validate_transfer_encoding_header(headers: &[HttpHeader]) -> Result<(), HttpValidationError> {
-    validate_not_supported_header(headers, "Transfer-Encoding")
+    Ok(())
 }
 
 fn validate_content_type_header(headers: &[HttpHeader]) -> Result<(), HttpValidationError> {
@@ -347,6 +331,8 @@ fn validate_content_type_header(headers: &[HttpHeader]) -> Result<(), HttpValida
                     APPLICATION_JSON, CONTENT_TYPE
                 )));
             }
+
+            println!("something");
 
             return Ok(());
         }
@@ -376,7 +362,7 @@ impl Error for HttpValidationError {}
 // most likely refactor, since I don't like how validation works as of now
 pub fn validate_headers(headers: &[HttpHeader], port: u16) -> Result<(), HttpValidationError> {
     validate_host_header(headers, port)?;
-    validate_transfer_encoding_header(headers)?;
+    validate_unsupported_headers(headers)?;
     validate_content_type_header(headers)?;
 
     Ok(())
