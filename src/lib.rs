@@ -53,7 +53,9 @@ fn write(writer: &mut Writer, response: HttpResponse) {
 }
 
 pub fn listen(listener: TcpListener, store: HttpHandlerStore, port: u16) {
-    // add support for multiple clients
+    // Add support for multiple clients and persistent connections
+    // The first can be achieved with an inner loop for handling requests and responses
+    // The second using a thread::spawn, I think
     for stream in listener.incoming() {
         let Ok(stream) = stream else {
             println!("Failed to accept a connection");

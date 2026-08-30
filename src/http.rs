@@ -11,7 +11,13 @@ const HTTP_VERSION: &'static str = "HTTP/1.1";
 const HEADER_VALUE_MAX_LENGTH: usize = 8192;
 const CONTENT_TYPE: &'static str = "Content-Type";
 const APPLICATION_JSON: &'static str = "application/json";
-const UNSUPPORTED_HEADERS: [&str; 2] = ["Transfer-Encoding", "Connection"];
+
+// Obviously, this primitive server implementation does NOT directly acknowledge a huge number of headers
+// however the majority will be passed down to the handlers, while these are mentioned specifically because:
+// - Transfer-Encoding should NOT be sent with Content-Length, which is required here
+// - Connection specifies the connection options, which are NOT implemented
+// - Upgrade is used for transitioning between protocols, however only HTTP/1.1 is supported
+const UNSUPPORTED_HEADERS: [&str; 3] = ["Transfer-Encoding", "Connection", "Upgrade"];
 
 // potentially unify all http errors under and enum
 #[derive(Debug)]
@@ -312,7 +318,10 @@ fn validate_unsupported_headers(headers: &[HttpHeader]) -> Result<(), HttpValida
         .find(|h| UNSUPPORTED_HEADERS.contains(&h.name.as_str()));
 
     if let Some(h) = unsupported_header {
-        return Err(HttpValidationError::new(format!("{} is NOT supported", h.name)));
+        return Err(HttpValidationError::new(format!(
+            "{} is NOT supported",
+            h.name
+        )));
     }
 
     Ok(())
@@ -331,8 +340,6 @@ fn validate_content_type_header(headers: &[HttpHeader]) -> Result<(), HttpValida
                     APPLICATION_JSON, CONTENT_TYPE
                 )));
             }
-
-            println!("something");
 
             return Ok(());
         }
