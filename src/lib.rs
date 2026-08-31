@@ -3,9 +3,13 @@ pub mod http;
 mod reader;
 mod writer;
 
-use std::net::TcpListener;
+use std::{error::Error, net::TcpListener};
 
-use crate::{http::*, reader::Reader, writer::Writer};
+use crate::{
+    http::*,
+    reader::{ReadError, Reader},
+    writer::Writer,
+};
 
 pub fn run(store: HttpHandlerStore) {
     run_on_port(3017, store)
@@ -24,7 +28,7 @@ fn bind_listener(port: u16) -> TcpListener {
         .unwrap_or_else(|_| panic!("Failed to bind to TCP port {}", port))
 }
 
-fn read_request_headers(reader: &mut Reader) -> Result<Vec<HttpHeader>, String> {
+fn read_request_headers(reader: &mut Reader) -> Result<Vec<HttpHeader>, Box<dyn Error>> {
     let mut headers = Vec::new();
 
     loop {
@@ -36,10 +40,10 @@ fn read_request_headers(reader: &mut Reader) -> Result<Vec<HttpHeader>, String> 
 
                 match HttpHeader::try_from(header) {
                     Ok(h) => headers.push(h),
-                    Err(e) => return Err(e.to_string()),
+                    Err(e) => return Err(Box::new(e)),
                 }
             }
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(Box::new(e)),
         }
     }
 
@@ -70,12 +74,19 @@ pub fn listen(listener: TcpListener, store: HttpHandlerStore, port: u16) {
         let mut reader = Reader::new(stream);
         let mut writer = Writer::new(stream_copy);
 
-        let Ok(request_line) = reader.read_request_line() else {
-            write(
-                &mut writer,
-                HttpResponse::bad_request_err("Failed to read the request line"),
-            );
-            continue;
+        let request_line = match reader.read_request_line() {
+            Ok(l) => l,
+            Err(e @ ReadError::UriTooLong) => {
+                write(&mut writer, HttpResponse::uri_too_long_err(e.to_string()));
+                continue;
+            }
+            Err(_) => {
+                write(
+                    &mut writer,
+                    HttpResponse::bad_request_err("Failed to read the request line"),
+                );
+                continue;
+            }
         };
 
         let request_line = match HttpRequestLine::try_from(request_line) {
@@ -86,12 +97,23 @@ pub fn listen(listener: TcpListener, store: HttpHandlerStore, port: u16) {
             }
         };
 
-        let Ok(headers) = read_request_headers(&mut reader) else {
-            write(
-                &mut writer,
-                HttpResponse::bad_request_err("Failed to read request headers"),
-            );
-            continue;
+        let headers = match read_request_headers(&mut reader) {
+            Ok(h) => h,
+            Err(e) => {
+                if let Some(e) = e.downcast_ref::<ReadError>() {
+                    write(
+                        &mut writer,
+                        HttpResponse::header_too_long_err(e.to_string()),
+                    );
+                    continue;
+                }
+
+                write(
+                    &mut writer,
+                    HttpResponse::bad_request_err("Failed to read request headers"),
+                );
+                continue;
+            }
         };
 
         if let Err(e) = validate_headers(&headers, port) {
@@ -132,12 +154,19 @@ fn handle_request(
         return;
     };
 
-    let Ok(body) = reader.read_body(size) else {
-        write(
-            writer,
-            HttpResponse::bad_request_err("Failed to read request body"),
-        );
-        return;
+    let body = match reader.read_body(size) {
+        Ok(b) => b,
+        Err(e @ ReadError::PayloadTooLarge) => {
+            write(writer, HttpResponse::payload_too_large_err(e.to_string()));
+            return;
+        }
+        Err(_) => {
+            write(
+                writer,
+                HttpResponse::bad_request_err("Failed to read request body"),
+            );
+            return;
+        }
     };
 
     match store.get(&request_line) {

@@ -1,9 +1,11 @@
 use std::{
     collections::HashMap,
+    error::Error,
     fmt::{self, Display, Formatter},
 };
 
 pub const CRLF: &'static str = "\r\n";
+// if there are multiple content-length headers or a content-length header with a comma separate values - return 400
 pub const CONTENT_LENGTH: &'static str = "Content-Length";
 
 const HTTP_VERSION: &'static str = "HTTP/1.1";
@@ -47,6 +49,8 @@ impl Display for HttpError {
     }
 }
 
+impl Error for HttpError {}
+
 // A small representation of some of the most popular status codes,
 // excluding any Information and Redirect codes
 pub enum HttpStatusCode {
@@ -57,6 +61,9 @@ pub enum HttpStatusCode {
     NotFound,
     MethodNotAllowed,
     LengthRequired,
+    PayloadTooLarge,
+    UriTooLong,
+    HeaderTooLong,
 }
 
 impl HttpStatusCode {
@@ -75,6 +82,9 @@ impl HttpStatusCode {
             Self::NotFound => 404,
             Self::MethodNotAllowed => 405,
             Self::LengthRequired => 411,
+            Self::PayloadTooLarge => 413,
+            Self::UriTooLong => 414,
+            Self::HeaderTooLong => 431,
         }
     }
 
@@ -87,6 +97,9 @@ impl HttpStatusCode {
             Self::NotFound => "Not Found",
             Self::MethodNotAllowed => "Method Not Allowed",
             Self::LengthRequired => "Length Required",
+            Self::PayloadTooLarge => "Payload Too Large",
+            Self::UriTooLong => "URI Too Long",
+            Self::HeaderTooLong => "Request Header Fields Too Large",
         }
     }
 }
@@ -404,11 +417,27 @@ impl HttpResponse {
     }
 
     pub fn bad_request_err(error: impl Into<String>) -> Self {
-        let body = format!("{{\r\n\t\"error\": \"{}\"\r\n}}\r\n", error.into())
-            .as_bytes()
-            .to_vec();
+        let body = Self::error_to_bytes(error);
 
         Self::new(HttpStatusCode::BadRequest, None, Some(body))
+    }
+
+    pub fn uri_too_long_err(error: impl Into<String>) -> Self {
+        let body = Self::error_to_bytes(error);
+
+        Self::new(HttpStatusCode::UriTooLong, None, Some(body))
+    }
+
+    pub fn payload_too_large_err(error: impl Into<String>) -> Self {
+        let body = Self::error_to_bytes(error);
+
+        Self::new(HttpStatusCode::PayloadTooLarge, None, Some(body))
+    }
+
+    pub fn header_too_long_err(error: impl Into<String>) -> Self {
+        let body = Self::error_to_bytes(error);
+
+        Self::new(HttpStatusCode::HeaderTooLong, None, Some(body))
     }
 
     pub fn not_found(headers: Option<Vec<HttpHeader>>, body: Option<Vec<u8>>) -> Self {
@@ -441,6 +470,12 @@ impl HttpResponse {
             headers,
             body,
         }
+    }
+
+    fn error_to_bytes(error: impl Into<String>) -> Vec<u8> {
+        format!("{{\r\n\t\"error\": \"{}\"\r\n}}\r\n", error.into())
+            .as_bytes()
+            .to_vec()
     }
 }
 
