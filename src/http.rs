@@ -51,6 +51,8 @@ impl Display for HttpError {
 
 impl Error for HttpError {}
 
+type Result<T> = core::result::Result<T, HttpError>;
+
 // A small representation of some of the most popular status codes,
 // excluding any Information and Redirect codes
 pub enum HttpStatusCode {
@@ -117,7 +119,7 @@ pub enum HttpMethod {
 impl TryFrom<&str> for HttpMethod {
     type Error = HttpError;
 
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
+    fn try_from(value: &str) -> core::result::Result<Self, Self::Error> {
         match value {
             "GET" => Ok(Self::GET),
             "POST" => Ok(Self::POST),
@@ -157,10 +159,7 @@ impl HttpRequestLine {
         }
     }
 
-    fn validate_parameter<'a>(
-        value: Option<&'a str>,
-        name: impl Display,
-    ) -> Result<&'a str, HttpError> {
+    fn validate_parameter<'a>(value: Option<&'a str>, name: impl Display) -> Result<&'a str> {
         match value {
             Some(v) if !v.is_empty() => Ok(v),
             Some(_) => Err(HttpError::Parse(format!("{} MUST NOT be empty", name))),
@@ -172,7 +171,7 @@ impl HttpRequestLine {
 impl TryFrom<String> for HttpRequestLine {
     type Error = HttpError;
 
-    fn try_from(value: String) -> Result<Self, Self::Error> {
+    fn try_from(value: String) -> core::result::Result<Self, Self::Error> {
         if !value.ends_with(CRLF) {
             return Err(HttpError::parse("Request line does NOT end with CRLF."));
         }
@@ -235,7 +234,7 @@ impl HttpHeader {
 impl TryFrom<String> for HttpHeader {
     type Error = HttpError;
 
-    fn try_from(value: String) -> Result<Self, Self::Error> {
+    fn try_from(value: String) -> core::result::Result<Self, Self::Error> {
         let value = value.trim_end_matches(CRLF);
 
         let Some((name, value)) = value.split_once(':') else {
@@ -279,7 +278,7 @@ impl<'a> From<HttpHeader> for Vec<u8> {
 const HOST_HEADER: &'static str = "Host";
 const LOCALHOST: &'static str = "localhost";
 const LOCALHOST_IP_V4: &'static str = "127.0.0.1";
-fn validate_host_header(headers: &[HttpHeader], port: u16) -> Result<(), HttpError> {
+fn validate_host_header(headers: &[HttpHeader], port: u16) -> Result<()> {
     let host_count = headers
         .iter()
         .filter(|&h| h.name.as_str().eq_ignore_ascii_case(HOST_HEADER))
@@ -335,7 +334,7 @@ fn validate_host_header(headers: &[HttpHeader], port: u16) -> Result<(), HttpErr
     }
 }
 
-fn validate_unsupported_headers(headers: &[HttpHeader]) -> Result<(), HttpError> {
+fn validate_unsupported_headers(headers: &[HttpHeader]) -> Result<()> {
     let unsupported_header = headers
         .iter()
         .find(|h| UNSUPPORTED_HEADERS.contains(&h.name.as_str()));
@@ -350,7 +349,7 @@ fn validate_unsupported_headers(headers: &[HttpHeader]) -> Result<(), HttpError>
     Ok(())
 }
 
-fn validate_content_type_header(headers: &[HttpHeader]) -> Result<(), HttpError> {
+fn validate_content_type_header(headers: &[HttpHeader]) -> Result<()> {
     let header = headers
         .iter()
         .find(|&h| h.name.as_str().eq_ignore_ascii_case(CONTENT_TYPE));
@@ -373,7 +372,7 @@ fn validate_content_type_header(headers: &[HttpHeader]) -> Result<(), HttpError>
 }
 
 // most likely refactor, since I don't like how validation works as of now
-pub fn validate_headers(headers: &[HttpHeader], port: u16) -> Result<(), HttpError> {
+pub fn validate_headers(headers: &[HttpHeader], port: u16) -> Result<()> {
     validate_host_header(headers, port)?;
     validate_unsupported_headers(headers)?;
     validate_content_type_header(headers)?;
@@ -557,7 +556,7 @@ impl HttpHandlerStore {
         path: impl Into<String>,
         method: HttpMethod,
         handler: F,
-    ) -> Result<(), HttpError>
+    ) -> Result<()>
     where
         F: 'static + Fn(RequestPayload) -> HttpResponse,
     {
