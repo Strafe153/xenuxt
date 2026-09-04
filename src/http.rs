@@ -4,14 +4,16 @@ use std::{
     fmt::{self, Display, Formatter},
 };
 
-pub const CRLF: &'static str = "\r\n";
-// if there are multiple content-length headers or a content-length header with a comma separate values - return 400
-pub const CONTENT_LENGTH: &'static str = "Content-Length";
+pub(crate) const CRLF: &'static str = "\r\n";
+pub(crate) const CONTENT_LENGTH: &'static str = "Content-Length";
+pub(crate) const CONTENT_TYPE: &'static str = "Content-Type";
+pub(crate) const LOCALHOST_IP_V4: &'static str = "127.0.0.1";
 
 const HTTP_VERSION: &'static str = "HTTP/1.1";
 const HEADER_VALUE_MAX_LENGTH: usize = 8192;
-const CONTENT_TYPE: &'static str = "Content-Type";
 const APPLICATION_JSON: &'static str = "application/json";
+const HOST: &'static str = "Host";
+const LOCALHOST: &'static str = "localhost";
 
 // Obviously, this primitive server implementation does NOT directly acknowledge a huge number of headers
 // however the majority will be passed down to the handlers, while these are mentioned specifically because:
@@ -145,14 +147,14 @@ impl From<&HttpMethod> for &'static str {
     }
 }
 
-pub struct HttpRequestLine {
+pub(crate) struct HttpRequestLine {
     pub query_string: Option<String>,
     method: HttpMethod,
     target: String,
 }
 
 impl HttpRequestLine {
-    pub fn requires_body(&self) -> bool {
+    pub(crate) fn expects_body(&self) -> bool {
         match self.method {
             HttpMethod::POST | HttpMethod::PUT | HttpMethod::PATCH => true,
             _ => false,
@@ -273,111 +275,6 @@ impl<'a> From<HttpHeader> for Vec<u8> {
     fn from(value: HttpHeader) -> Self {
         format!("{}: {}{}", value.name, value.value, CRLF).into_bytes()
     }
-}
-
-const HOST_HEADER: &'static str = "Host";
-const LOCALHOST: &'static str = "localhost";
-const LOCALHOST_IP_V4: &'static str = "127.0.0.1";
-fn validate_host_header(headers: &[HttpHeader], port: u16) -> Result<()> {
-    let host_count = headers
-        .iter()
-        .filter(|&h| h.name.as_str().eq_ignore_ascii_case(HOST_HEADER))
-        .count();
-
-    if host_count > 1 {
-        return Err(HttpError::validation(format!(
-            "Only one '{}' header is allowed",
-            HOST_HEADER
-        )));
-    }
-
-    let host = headers
-        .iter()
-        .find(|&h| h.name.as_str().eq_ignore_ascii_case(HOST_HEADER));
-
-    match host {
-        Some(h) => {
-            if !h.value.starts_with(LOCALHOST) && !h.value.starts_with(LOCALHOST_IP_V4) {
-                return Err(HttpError::validation(format!(
-                    "Host MUST be either {} or {}",
-                    LOCALHOST, LOCALHOST_IP_V4
-                )));
-            }
-
-            match h.value.split_once(':') {
-                Some((_, p)) => {
-                    match p.parse::<u16>() {
-                        Ok(p) => {
-                            if p != port {
-                                return Err(HttpError::validation("Incorrect port"));
-                            }
-
-                            return Ok(());
-                        }
-                        Err(_) => {
-                            return Err(HttpError::validation(""));
-                        }
-                    };
-                }
-                None => {
-                    if port != 80 {
-                        return Err(HttpError::validation("Incorrect port"));
-                    }
-
-                    Ok(())
-                }
-            }
-        }
-        None => {
-            return Err(HttpError::validation("Host header is required"));
-        }
-    }
-}
-
-fn validate_unsupported_headers(headers: &[HttpHeader]) -> Result<()> {
-    let unsupported_header = headers
-        .iter()
-        .find(|h| UNSUPPORTED_HEADERS.contains(&h.name.as_str()));
-
-    if let Some(h) = unsupported_header {
-        return Err(HttpError::validation(format!(
-            "{} is NOT supported",
-            h.name
-        )));
-    }
-
-    Ok(())
-}
-
-fn validate_content_type_header(headers: &[HttpHeader]) -> Result<()> {
-    let header = headers
-        .iter()
-        .find(|&h| h.name.as_str().eq_ignore_ascii_case(CONTENT_TYPE));
-
-    match header {
-        Some(header) => {
-            if header.name == CONTENT_TYPE && header.value != APPLICATION_JSON {
-                return Err(HttpError::validation(format!(
-                    "Only '{}' is supported for '{}'",
-                    APPLICATION_JSON, CONTENT_TYPE
-                )));
-            }
-
-            return Ok(());
-        }
-        None => {}
-    }
-
-    Ok(())
-}
-
-// most likely refactor, since I don't like how validation works as of now
-pub fn validate_headers(headers: &[HttpHeader], port: u16) -> Result<()> {
-    validate_host_header(headers, port)?;
-    validate_unsupported_headers(headers)?;
-    validate_content_type_header(headers)?;
-
-    Ok(())
 }
 
 pub struct HttpBody(Vec<u8>);
@@ -592,7 +489,7 @@ impl HttpHandlerStore {
         Ok(())
     }
 
-    pub fn get(&self, req: &HttpRequestLine) -> HttpHandler<'_> {
+    pub(crate) fn get(&self, req: &HttpRequestLine) -> HttpHandler<'_> {
         match self.0.get(&req.target) {
             Some(handlers) => {
                 let handler = handlers.iter().find(|h| h.method == req.method);
@@ -607,5 +504,122 @@ impl HttpHandlerStore {
             }
             None => return HttpHandler::NotFound,
         }
+    }
+}
+
+pub(crate) fn validate_host(headers: &[HttpHeader], port: u16) -> Result<()> {
+    let headers: Vec<&HttpHeader> = headers
+        .iter()
+        .filter(|&h| h.name.as_str().eq_ignore_ascii_case(HOST))
+        .collect();
+
+    if headers.iter().count() > 1 {
+        return Err(HttpError::validation(format!(
+            "Only one '{}' header is allowed",
+            HOST
+        )));
+    }
+
+    let Some(host) = headers.first() else {
+        return Err(HttpError::validation("Host header is required"));
+    };
+
+    if !host.value.starts_with(LOCALHOST) && !host.value.starts_with(LOCALHOST_IP_V4) {
+        return Err(HttpError::validation(format!(
+            "Host MUST be either {} or {}",
+            LOCALHOST, LOCALHOST_IP_V4
+        )));
+    }
+
+    let Some((_, host_port)) = host.value.split_once(':') else {
+        if port != 80 {
+            return Err(HttpError::validation("Incorrect port"));
+        }
+
+        return Ok(());
+    };
+
+    let host_port = host_port
+        .parse::<u16>()
+        .map_err(|_| HttpError::validation(format!("Failed to parse '{}' port", HOST)))?;
+
+    if host_port != port {
+        return Err(HttpError::validation(format!(
+            "'{}' port is not the same as the running port",
+            HOST
+        )));
+    }
+
+    Ok(())
+}
+
+pub(crate) fn validate_unsupported(headers: &[HttpHeader]) -> Result<()> {
+    let unsupported_header = headers
+        .iter()
+        .find(|h| UNSUPPORTED_HEADERS.contains(&h.name.as_str()));
+
+    if let Some(h) = unsupported_header {
+        return Err(HttpError::validation(format!(
+            "{} is NOT supported",
+            h.name
+        )));
+    }
+
+    Ok(())
+}
+
+pub(crate) fn validate_content_length(headers: &[HttpHeader]) -> Result<Option<&HttpHeader>> {
+    let headers: Vec<&HttpHeader> = headers
+        .iter()
+        .filter(|&h| h.name.as_str().eq_ignore_ascii_case(CONTENT_LENGTH))
+        .collect();
+
+    if headers.iter().count() > 1 {
+        return Err(HttpError::validation(format!(
+            "Only one '{}' header is allowed",
+            CONTENT_LENGTH
+        )));
+    }
+
+    match headers.first() {
+        Some(h) => {
+            if h.value.contains(',') {
+                return Err(HttpError::validation(format!(
+                    "Comma-separated value is NOT allowed for '{}'",
+                    CONTENT_LENGTH
+                )));
+            }
+
+            Ok(Some(h))
+        }
+        None => Ok(None),
+    }
+}
+
+pub(crate) fn validate_content_type(headers: &[HttpHeader]) -> Result<Option<&HttpHeader>> {
+    let headers: Vec<&HttpHeader> = headers
+        .iter()
+        .filter(|&h| h.name.as_str().eq_ignore_ascii_case(CONTENT_TYPE))
+        .collect();
+
+    if headers.iter().count() > 1 {
+        return Err(HttpError::validation(format!(
+            "Only one '{}' header is allowed",
+            CONTENT_TYPE
+        )));
+    }
+
+    match headers.first() {
+        Some(h) => {
+            if h.name == CONTENT_TYPE && h.value != APPLICATION_JSON {
+                return Err(HttpError::validation(format!(
+                    "Only '{}' is supported for '{}'",
+                    APPLICATION_JSON, CONTENT_TYPE
+                )));
+            }
+
+            Ok(Some(h))
+        }
+        None => Ok(None),
     }
 }
