@@ -12,8 +12,12 @@ impl Writer {
         Self(BufWriter::new(stream))
     }
 
-    pub fn write(&mut self, response: HttpResponse) -> Result<usize, Error> {
+    pub fn write(&mut self, response: HttpResponse) -> Result<(), Error> {
         let mut data: Vec<u8> = response.into();
-        self.0.write(&mut data)
+
+        self.0.write_all(&mut data)?;
+        self.0.flush()?;
+
+        Ok(())
     }
 }

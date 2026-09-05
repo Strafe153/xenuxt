@@ -1,4 +1,4 @@
-use std::{error::Error, net::TcpListener};
+use std::{error::Error, io::ErrorKind, net::TcpListener};
 
 use crate::{
     http::*,
@@ -44,9 +44,7 @@ fn write(writer: &mut Writer, response: HttpResponse) {
 }
 
 fn listen(listener: TcpListener, store: HttpHandlerStore, port: u16) {
-    // Add support for multiple clients and persistent connections
-    // The first can be achieved with an inner loop for handling requests and responses
-    // The second using a thread::spawn, I think
+    // Add support for multiple clients using a thread::spawn, I think
     for stream in listener.incoming() {
         let Ok(stream) = stream else {
             println!("Failed to accept a connection");
@@ -61,64 +59,69 @@ fn listen(listener: TcpListener, store: HttpHandlerStore, port: u16) {
         let mut reader = Reader::new(stream);
         let mut writer = Writer::new(stream_copy);
 
-        let request_line = match reader.read_request_line() {
-            Ok(l) => l,
-            Err(e @ ReadError::UriTooLong) => {
-                write(&mut writer, HttpResponse::uri_too_long_err(e.to_string()));
-                continue;
-            }
-            Err(_) => {
-                write(
-                    &mut writer,
-                    HttpResponse::bad_request_err("Failed to read the request line"),
-                );
-                continue;
-            }
-        };
-
-        let request_line = match HttpRequestLine::try_from(request_line) {
-            Ok(line) => line,
-            Err(e) => {
-                write(&mut writer, HttpResponse::bad_request_err(e.to_string()));
-                continue;
-            }
-        };
-
-        let headers = match read_request_headers(&mut reader) {
-            Ok(h) => h,
-            Err(e) => {
-                if let Some(e) = e.downcast_ref::<ReadError>() {
+        loop {
+            let request_line = match reader.read_request_line() {
+                Ok(l) => l,
+                Err(e @ ReadError::UriTooLong) => {
+                    write(&mut writer, HttpResponse::uri_too_long_err(e.to_string()));
+                    continue;
+                }
+                Err(ReadError::IoError(e)) if e.kind() == ErrorKind::UnexpectedEof => {
+                    break;
+                }
+                Err(_) => {
                     write(
                         &mut writer,
-                        HttpResponse::header_too_long_err(e.to_string()),
+                        HttpResponse::bad_request_err("Failed to read the request line"),
+                    );
+                    break;
+                }
+            };
+
+            let request_line = match HttpRequestLine::try_from(request_line) {
+                Ok(line) => line,
+                Err(e) => {
+                    write(&mut writer, HttpResponse::bad_request_err(e.to_string()));
+                    continue;
+                }
+            };
+
+            let headers = match read_request_headers(&mut reader) {
+                Ok(h) => h,
+                Err(e) => {
+                    if let Some(e) = e.downcast_ref::<ReadError>() {
+                        write(
+                            &mut writer,
+                            HttpResponse::header_too_long_err(e.to_string()),
+                        );
+                        continue;
+                    }
+
+                    write(
+                        &mut writer,
+                        HttpResponse::bad_request_err("Failed to read request headers"),
                     );
                     continue;
                 }
+            };
 
-                write(
-                    &mut writer,
-                    HttpResponse::bad_request_err("Failed to read request headers"),
-                );
+            if let Err(e) = validate_host(&headers, port) {
+                write(&mut writer, HttpResponse::bad_request_err(e.to_string()));
                 continue;
             }
-        };
 
-        if let Err(e) = validate_host(&headers, port) {
-            write(&mut writer, HttpResponse::bad_request_err(e.to_string()));
-            continue;
+            if let Err(e) = validate_unsupported(&headers) {
+                write(&mut writer, HttpResponse::bad_request_err(e.to_string()));
+                continue;
+            }
+
+            if request_line.expects_body() {
+                handle_with_body(request_line, headers, &mut reader, &mut writer, &store);
+                continue;
+            }
+
+            handle_without_body(request_line, headers, &mut writer, &store);
         }
-
-        if let Err(e) = validate_unsupported(&headers) {
-            write(&mut writer, HttpResponse::bad_request_err(e.to_string()));
-            continue;
-        }
-
-        if request_line.expects_body() {
-            handle_with_body(request_line, headers, &mut reader, &mut writer, &store);
-            continue;
-        }
-
-        handle_without_body(request_line, headers, &mut writer, &store);
     }
 }
 
