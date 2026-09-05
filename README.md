@@ -1,6 +1,6 @@
 # Xenuxt
 
-A primitive HTTP/1.1 server written in Rust for learning purposes.
+A primitive HTTP/1.1 server written in Rust with `application/json` support for learning purposes.
 
 It is based on [RFC 7230](https://datatracker.ietf.org/doc/html/rfc7230), but does **NOT** implement every detail of the specification. Instead, Xenuxt aims to provide a minimal, reasonable subset of HTTP/1.1 functionality while keeping the implementation simple and understandable.
 
