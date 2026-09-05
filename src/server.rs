@@ -43,8 +43,73 @@ fn write(writer: &mut Writer, response: HttpResponse) {
     }
 }
 
+enum IterationResult<T> {
+    Value(T),
+    Continue,
+    Break,
+}
+
+fn get_request_line(reader: &mut Reader, writer: &mut Writer) -> IterationResult<HttpRequestLine> {
+    let request_line = match reader.read_request_line() {
+        Ok(l) => l,
+        Err(e @ ReadError::UriTooLong) => {
+            write(writer, HttpResponse::uri_too_long_err(e.to_string()));
+            return IterationResult::Continue;
+        }
+        Err(ReadError::IoError(e)) if e.kind() == ErrorKind::UnexpectedEof => {
+            return IterationResult::Break;
+        }
+        Err(_) => {
+            write(
+                writer,
+                HttpResponse::bad_request_err("Failed to read the request line"),
+            );
+
+            return IterationResult::Break;
+        }
+    };
+
+    let request_line = match HttpRequestLine::try_from(request_line) {
+        Ok(line) => line,
+        Err(e) => {
+            write(writer, HttpResponse::bad_request_err(e.to_string()));
+            return IterationResult::Continue;
+        }
+    };
+
+    IterationResult::Value(request_line)
+}
+
+fn get_headers(reader: &mut Reader, writer: &mut Writer) -> IterationResult<Vec<HttpHeader>> {
+    let headers = match read_request_headers(reader) {
+        Ok(h) => h,
+        Err(e) => {
+            if let Some(ReadError::IoError(e)) = e.downcast_ref::<ReadError>()
+                && e.kind() == ErrorKind::UnexpectedEof
+            {
+                return IterationResult::Break;
+            }
+
+            if let Some(e) = e.downcast_ref::<ReadError>() {
+                write(writer, HttpResponse::header_too_long_err(e.to_string()));
+
+                return IterationResult::Continue;
+            }
+
+            write(
+                writer,
+                HttpResponse::bad_request_err("Failed to read request headers"),
+            );
+
+            return IterationResult::Break;
+        }
+    };
+
+    IterationResult::Value(headers)
+}
+
 fn listen(listener: TcpListener, store: HttpHandlerStore, port: u16) {
-    // Add support for multiple clients using a thread::spawn, I think
+    // TODO: Potentially, add support for multiple clients using thread::spawn
     for stream in listener.incoming() {
         let Ok(stream) = stream else {
             println!("Failed to accept a connection");
@@ -60,56 +125,16 @@ fn listen(listener: TcpListener, store: HttpHandlerStore, port: u16) {
         let mut writer = Writer::new(stream_copy);
 
         loop {
-            let request_line = match reader.read_request_line() {
-                Ok(l) => l,
-                Err(e @ ReadError::UriTooLong) => {
-                    write(&mut writer, HttpResponse::uri_too_long_err(e.to_string()));
-                    continue;
-                }
-                Err(ReadError::IoError(e)) if e.kind() == ErrorKind::UnexpectedEof => {
-                    break;
-                }
-                Err(_) => {
-                    write(
-                        &mut writer,
-                        HttpResponse::bad_request_err("Failed to read the request line"),
-                    );
-                    break;
-                }
+            let request_line = match get_request_line(&mut reader, &mut writer) {
+                IterationResult::Value(l) => l,
+                IterationResult::Continue => continue,
+                IterationResult::Break => break,
             };
 
-            let request_line = match HttpRequestLine::try_from(request_line) {
-                Ok(line) => line,
-                Err(e) => {
-                    write(&mut writer, HttpResponse::bad_request_err(e.to_string()));
-                    continue;
-                }
-            };
-
-            let headers = match read_request_headers(&mut reader) {
-                Ok(h) => h,
-                Err(e) => {
-                    if let Some(ReadError::IoError(e)) = e.downcast_ref::<ReadError>()
-                        && e.kind() == ErrorKind::UnexpectedEof
-                    {
-                        break;
-                    }
-
-                    if let Some(e) = e.downcast_ref::<ReadError>() {
-                        write(
-                            &mut writer,
-                            HttpResponse::header_too_long_err(e.to_string()),
-                        );
-                        continue;
-                    }
-
-                    write(
-                        &mut writer,
-                        HttpResponse::bad_request_err("Failed to read request headers"),
-                    );
-
-                    break;
-                }
+            let headers = match get_headers(&mut reader, &mut writer) {
+                IterationResult::Value(l) => l,
+                IterationResult::Continue => continue,
+                IterationResult::Break => break,
             };
 
             if let Err(e) = validate_host(&headers, port) {

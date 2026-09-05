@@ -15,7 +15,7 @@ const APPLICATION_JSON: &'static str = "application/json";
 const HOST: &'static str = "Host";
 const LOCALHOST: &'static str = "localhost";
 
-// Obviously, this primitive server implementation does NOT directly acknowledge a huge number of headers
+// NOTE: Obviously, this primitive server implementation does NOT directly acknowledge a huge number of headers
 // however the majority will be passed down to the handlers, while these are mentioned specifically because:
 // - Transfer-Encoding should NOT be sent with Content-Length, which is required here
 // - Connection specifies the connection options, which are NOT implemented
@@ -55,7 +55,7 @@ impl Error for HttpError {}
 
 type Result<T> = core::result::Result<T, HttpError>;
 
-// A small representation of some of the most popular status codes,
+// NOTE: A small representation of some of the most popular status codes,
 // excluding any Information and Redirect codes
 pub enum HttpStatusCode {
     OK,
@@ -190,7 +190,7 @@ impl TryFrom<String> for HttpRequestLine {
 
         let mut query_string: Option<String> = None;
 
-        // Current implementation simply passes the query string downstream,
+        // NOTE: Current implementation simply passes the query string downstream,
         // offloading the parsing and validation onto the user
         if let Some((path, query)) = target.split_once('?') {
             target = path;
