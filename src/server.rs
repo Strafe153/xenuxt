@@ -89,6 +89,12 @@ fn listen(listener: TcpListener, store: HttpHandlerStore, port: u16) {
             let headers = match read_request_headers(&mut reader) {
                 Ok(h) => h,
                 Err(e) => {
+                    if let Some(ReadError::IoError(e)) = e.downcast_ref::<ReadError>()
+                        && e.kind() == ErrorKind::UnexpectedEof
+                    {
+                        break;
+                    }
+
                     if let Some(e) = e.downcast_ref::<ReadError>() {
                         write(
                             &mut writer,
@@ -101,7 +107,8 @@ fn listen(listener: TcpListener, store: HttpHandlerStore, port: u16) {
                         &mut writer,
                         HttpResponse::bad_request_err("Failed to read request headers"),
                     );
-                    continue;
+
+                    break;
                 }
             };
 
